@@ -4,31 +4,57 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 	"time"
+
+	"github.com/1amkhush/torrentium/pkg/config"
+	"github.com/1amkhush/torrentium/pkg/logger"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/pion/webrtc/v3"
 )
 
-const (
-	maxICEGatheringTimeout = 15 * time.Second
-	connectionTimeout      = 30 * time.Second
-	keepAliveInterval      = 15 * time.Second
-)
-
-var webrtcConfig = webrtc.Configuration{
-	ICEServers: []webrtc.ICEServer{
+// GetWebRTCConfig returns the WebRTC configuration from the global config
+func GetWebRTCConfig() webrtc.Configuration {
+	cfg := config.Global()
+	
+	iceServers := []webrtc.ICEServer{
 		{
-			URLs: []string{
-				"stun:stun.l.google.com:19302",
-				"stun:stun1.l.google.com:19302",
-				"stun:stun.cloudflare.com:3478",
-			},
+			URLs: cfg.WebRTC.STUNServers,
 		},
-	},
+	}
+
+	// Add TURN servers if configured
+	for _, turn := range cfg.WebRTC.TURNServers {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs:       turn.URLs,
+			Username:   turn.Username,
+			Credential: turn.Credential,
+		})
+	}
+
+	return webrtc.Configuration{
+		ICEServers: iceServers,
+	}
+}
+
+// getICEGatheringTimeout returns the ICE gathering timeout from config
+func getICEGatheringTimeout() time.Duration {
+	cfg := config.Global()
+	if cfg != nil {
+		return cfg.WebRTC.ICEGatheringTimeout
+	}
+	return 15 * time.Second
+}
+
+// getKeepAliveInterval returns the keep-alive interval from config
+func getKeepAliveInterval() time.Duration {
+	cfg := config.Global()
+	if cfg != nil {
+		return cfg.WebRTC.KeepAliveInterval
+	}
+	return 15 * time.Second
 }
 
 type ConnectionState int
@@ -63,6 +89,7 @@ type SimpleWebRTCPeer struct {
 }
 
 func NewSimpleWebRTCPeer(onMessage func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer), onClose func(peerID peer.ID)) (*SimpleWebRTCPeer, error) {
+	webrtcConfig := GetWebRTCConfig()
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create peer connection: %w", err)
@@ -85,8 +112,10 @@ func NewSimpleWebRTCPeer(onMessage func(msg webrtc.DataChannelMessage, peer *Sim
 }
 
 func (p *SimpleWebRTCPeer) setupConnectionHandlers() {
+	log := logger.WithComponent("webrtc")
+
 	p.pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("ICE Connection State changed: %s", state.String())
+		log.Debug().Str("state", state.String()).Msg("ICE Connection State changed")
 		switch state {
 		case webrtc.ICEConnectionStateConnected:
 			p.setConnectionState(ConnectionStateConnected)
@@ -102,14 +131,14 @@ func (p *SimpleWebRTCPeer) setupConnectionHandlers() {
 	})
 
 	p.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("Connection State changed: %s", state.String())
+		log.Debug().Str("state", state.String()).Msg("Connection State changed")
 		if state == webrtc.PeerConnectionStateFailed {
 			p.Close()
 		}
 	})
 
 	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("New DataChannel %s", dc.Label())
+		log.Debug().Str("label", dc.Label()).Msg("New DataChannel")
 		if dc.Label() == "reliable" {
 			p.reliableDC = dc
 		} else {
@@ -120,8 +149,10 @@ func (p *SimpleWebRTCPeer) setupConnectionHandlers() {
 }
 
 func (p *SimpleWebRTCPeer) setupDataChannel(dc *webrtc.DataChannel) {
+	log := logger.WithComponent("webrtc")
+
 	dc.OnOpen(func() {
-		log.Printf("Data channel '%s' opened", dc.Label())
+		log.Debug().Str("label", dc.Label()).Msg("Data channel opened")
 		p.setConnectionState(ConnectionStateConnected)
 
 		//Signal that this data channel is open
@@ -134,7 +165,7 @@ func (p *SimpleWebRTCPeer) setupDataChannel(dc *webrtc.DataChannel) {
 	})
 
 	dc.OnClose(func() {
-		log.Printf("Data channel '%s' closed", dc.Label())
+		log.Debug().Str("label", dc.Label()).Msg("Data channel closed")
 		p.setConnectionState(ConnectionStateClosed)
 	})
 
@@ -178,8 +209,8 @@ func (p *SimpleWebRTCPeer) CreateOffer() (string, error) {
 
 	select {
 	case <-gatherComplete:
-	case <-time.After(maxICEGatheringTimeout):
-		log.Println("ICE gathering timed out")
+	case <-time.After(getICEGatheringTimeout()):
+		logger.Warn().Msg("ICE gathering timed out")
 	}
 
 	offerJSON, err := json.Marshal(p.pc.LocalDescription())
@@ -212,8 +243,8 @@ func (p *SimpleWebRTCPeer) HandleOffer(offerStr string) (string, error) {
 
 	select {
 	case <-gatherComplete:
-	case <-time.After(maxICEGatheringTimeout):
-		log.Println("ICE gathering timed out")
+	case <-time.After(getICEGatheringTimeout()):
+		logger.Warn().Msg("ICE gathering timed out")
 	}
 
 	answerJSON, err := json.Marshal(p.pc.LocalDescription())
@@ -359,7 +390,7 @@ func (p *SimpleWebRTCPeer) setConnectionState(state ConnectionState) {
 	}
 
 	p.state = state
-	log.Printf("Connection state changed to: %d", state)
+	logger.Debug().Int("state", int(state)).Msg("Connection state changed")
 
 	if state == ConnectionStateConnected {
 		p.startKeepAlive()
@@ -378,13 +409,13 @@ func (p *SimpleWebRTCPeer) startKeepAlive() {
 	if p.keepAliveTick != nil {
 		return
 	}
-	p.keepAliveTick = time.NewTicker(keepAliveInterval)
+	p.keepAliveTick = time.NewTicker(getKeepAliveInterval())
 	go func() {
 		for {
 			select {
 			case <-p.keepAliveTick.C:
 				if err := p.SendJSON(map[string]string{"type": "ping"}); err != nil {
-					log.Printf("Failed to send keepalive: %v", err)
+					logger.Debug().Err(err).Msg("Failed to send keepalive")
 				}
 			case <-p.closeCh:
 				return
@@ -405,11 +436,12 @@ func (p *SimpleWebRTCPeer) WaitForCloseChannel() <-chan struct{} {
 }
 
 func (p *SimpleWebRTCPeer) SignalDownloadComplete() {
-	log.Printf("Download completed, closing connection")
+	logger.Debug().Msg("Download completed, closing connection")
 	p.Close()
 }
 
 func TestICEConnectivity() error {
+	webrtcConfig := GetWebRTCConfig()
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create test connection: %w", err)
@@ -422,7 +454,7 @@ func TestICEConnectivity() error {
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			candidateCount++
-			log.Printf("Test ICE candidate: %s", candidate.String())
+			logger.Debug().Str("candidate", candidate.String()).Msg("Test ICE candidate")
 		}
 	})
 
@@ -451,11 +483,11 @@ func TestICEConnectivity() error {
 			return fmt.Errorf("no ICE candidates generated - network connectivity issues")
 		}
 		return nil
-	case <-time.After(maxICEGatheringTimeout):
+	case <-time.After(getICEGatheringTimeout()):
 		if candidateCount == 0 {
 			return fmt.Errorf("ICE gathering timeout - no candidates generated")
 		}
-		log.Printf("ICE gathering timed out with %d candidates", candidateCount)
+		logger.Warn().Int("candidates", candidateCount).Msg("ICE gathering timed out")
 		return nil
 	}
 }

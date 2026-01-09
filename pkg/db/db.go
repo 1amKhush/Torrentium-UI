@@ -5,12 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
+	"github.com/1amkhush/torrentium/pkg/config"
+	"github.com/1amkhush/torrentium/pkg/logger"
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -53,35 +53,74 @@ type PeerScore struct {
 	SeenAt time.Time
 }
 
+// FileEntry represents a single file within a multi-file torrent
+type FileEntry struct {
+	ID       string `json:"id,omitempty"`
+	CID      string `json:"cid,omitempty"`
+	Path     string `json:"path"`   // Relative path within torrent
+	Size     int64  `json:"size"`   // File size in bytes
+	Offset   int64  `json:"offset"` // Byte offset in the concatenated data
+	FileHash string `json:"file_hash,omitempty"`
+}
+
+// UploadRecord tracks upload statistics per CID/peer
+type UploadRecord struct {
+	ID            string
+	CID           string
+	PeerID        string
+	BytesUploaded int64
+	ChunksServed  int
+	UploadedAt    time.Time
+}
+
 type Repository struct {
 	DB *sql.DB
 }
 
 func NewRepository(db *sql.DB) *Repository { return &Repository{DB: db} }
 
-var DB *sql.DB
-
-func InitDB() *sql.DB {
-	if err := godotenv.Load(); err != nil {
-		//log.Printf("Warning: Could not load .env file: %v", err)
-	}
-	dbpath := os.Getenv("SQLITE_DB_PATH")
+// InitDB initializes and returns a database connection with proper configuration.
+// Returns the database connection and any error encountered.
+func InitDB(cfg *config.DatabaseConfig) (*sql.DB, error) {
+	dbpath := cfg.Path
 	if dbpath == "" {
-		dbpath = "./peer.db"
+		dbpath = os.Getenv("SQLITE_DB_PATH")
+		if dbpath == "" {
+			dbpath = "./peer.db"
+		}
 	}
-	var err error
-	DB, err = sql.Open("sqlite3", dbpath)
+
+	db, err := sql.Open("sqlite3", dbpath)
 	if err != nil {
-		log.Fatalf("Error creating DB connection: %v", err)
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	if err = DB.Ping(); err != nil {
-		log.Fatalf("Error connecting to DB: %v", err)
+
+	// Configure connection pool
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
+
+	// Verify connection
+	if err = db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
-	if err := createTables(DB); err != nil {
-		log.Fatalf("Error creating tables: %v", err)
+
+	// Create tables
+	if err := createTables(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
-	log.Println("Successfully connected to peer database")
-	return DB
+
+	logger.Info().Str("path", dbpath).Msg("Successfully connected to peer database")
+	return db, nil
+}
+
+// InitDBWithDefaults initializes database with default configuration
+func InitDBWithDefaults() (*sql.DB, error) {
+	cfg := config.DefaultConfig()
+	return InitDB(&cfg.Database)
 }
 
 func createTables(db *sql.DB) error {
@@ -93,6 +132,7 @@ func createTables(db *sql.DB) error {
 			file_size INTEGER NOT NULL,
 			file_path TEXT NOT NULL,
 			file_hash TEXT NOT NULL,
+			is_directory INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE TABLE IF NOT EXISTS downloads (
@@ -127,6 +167,29 @@ func createTables(db *sql.DB) error {
 			file_size INTEGER NOT NULL,
 			file_hash TEXT NOT NULL
 		);`,
+		// New table for multi-file support
+		`CREATE TABLE IF NOT EXISTS file_entries (
+			id TEXT PRIMARY KEY,
+			cid TEXT NOT NULL,
+			path TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			offset INTEGER NOT NULL,
+			file_hash TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (cid, path)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_entries_cid ON file_entries(cid);`,
+		// New table for upload tracking
+		`CREATE TABLE IF NOT EXISTS uploads (
+			id TEXT PRIMARY KEY,
+			cid TEXT NOT NULL,
+			peer_id TEXT NOT NULL,
+			bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+			chunks_served INTEGER NOT NULL DEFAULT 0,
+			uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (cid, peer_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_uploads_cid ON uploads(cid);`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -142,13 +205,15 @@ func (r *Repository) AddLocalFile(ctx context.Context, cid, filename string, fil
 	      ON CONFLICT(cid) DO UPDATE SET filename=excluded.filename, file_path=excluded.file_path, file_size=excluded.file_size, file_hash=excluded.file_hash`
 	_, err := r.DB.ExecContext(ctx, q, uuid.New().String(), cid, filename, fileSize, filePath, fileHash, time.Now())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to add local file: %w", err)
 	}
 	// update metadata index for search
-	_, _ = r.DB.ExecContext(ctx, `INSERT INTO metadata_index (cid, filename, file_size, file_hash)
+	if _, err := r.DB.ExecContext(ctx, `INSERT INTO metadata_index (cid, filename, file_size, file_hash)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(cid) DO UPDATE SET filename=excluded.filename, file_size=excluded.file_size, file_hash=excluded.file_hash`,
-		cid, filename, fileSize, fileHash)
+		cid, filename, fileSize, fileHash); err != nil {
+		logger.Warn().Err(err).Str("cid", cid).Msg("Failed to update metadata index")
+	}
 	return nil
 }
 
@@ -189,6 +254,23 @@ func (r *Repository) AddDownload(ctx context.Context, cid, filename string, file
 		VALUES (?, ?, ?, ?, ?, ?, 'completed') ON CONFLICT(cid) DO UPDATE SET status='completed', downloaded_at=excluded.downloaded_at, download_path=excluded.download_path`,
 		uuid.New().String(), cid, filename, fileSize, downloadPath, time.Now())
 	return err
+}
+
+func (r *Repository) GetDownloads(ctx context.Context) ([]Download, error) {
+	rows, err := r.DB.QueryContext(ctx, `SELECT id, cid, filename, file_size, download_path, downloaded_at, status FROM downloads ORDER BY downloaded_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var downloads []Download
+	for rows.Next() {
+		var d Download
+		if err := rows.Scan(&d.ID, &d.CID, &d.Filename, &d.FileSize, &d.DownloadPath, &d.DownloadedAt, &d.Status); err != nil {
+			return nil, err
+		}
+		downloads = append(downloads, d)
+	}
+	return downloads, rows.Err()
 }
 
 func (r *Repository) UpsertPiece(ctx context.Context, cid string, idx int64, offset, size int64, hash string, have bool) error {
@@ -296,4 +378,84 @@ func (r *Repository) SearchByFilename(ctx context.Context, q string) ([]LocalFil
 	return res, rows.Err()
 }
 
-func boolToInt(b bool) int { if b { return 1 }; return 0 }
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// AddFileEntry adds a file entry for multi-file torrent support
+func (r *Repository) AddFileEntry(ctx context.Context, cid, path string, size, offset int64, fileHash string) error {
+	_, err := r.DB.ExecContext(ctx, `INSERT INTO file_entries (id, cid, path, size, offset, file_hash, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(cid, path) DO UPDATE SET size=excluded.size, offset=excluded.offset, file_hash=excluded.file_hash`,
+		uuid.New().String(), cid, path, size, offset, fileHash, time.Now())
+	return err
+}
+
+// GetFileEntries returns all file entries for a CID
+func (r *Repository) GetFileEntries(ctx context.Context, cid string) ([]FileEntry, error) {
+	rows, err := r.DB.QueryContext(ctx, `SELECT id, cid, path, size, offset, file_hash FROM file_entries WHERE cid=? ORDER BY offset ASC`, cid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []FileEntry
+	for rows.Next() {
+		var e FileEntry
+		if err := rows.Scan(&e.ID, &e.CID, &e.Path, &e.Size, &e.Offset, &e.FileHash); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// RecordUpload records or updates upload statistics for a CID/peer combination
+func (r *Repository) RecordUpload(ctx context.Context, cid, peerID string, bytesUploaded int64, chunksServed int) error {
+	_, err := r.DB.ExecContext(ctx, `INSERT INTO uploads (id, cid, peer_id, bytes_uploaded, chunks_served, uploaded_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(cid, peer_id) DO UPDATE SET 
+			bytes_uploaded = uploads.bytes_uploaded + excluded.bytes_uploaded,
+			chunks_served = uploads.chunks_served + excluded.chunks_served,
+			uploaded_at = excluded.uploaded_at`,
+		uuid.New().String(), cid, peerID, bytesUploaded, chunksServed, time.Now())
+	return err
+}
+
+// GetUploadStats returns upload statistics for all CIDs or a specific CID
+func (r *Repository) GetUploadStats(ctx context.Context, cid string) ([]UploadRecord, error) {
+	var rows *sql.Rows
+	var err error
+	if cid == "" {
+		rows, err = r.DB.QueryContext(ctx, `SELECT id, cid, peer_id, bytes_uploaded, chunks_served, uploaded_at FROM uploads ORDER BY uploaded_at DESC`)
+	} else {
+		rows, err = r.DB.QueryContext(ctx, `SELECT id, cid, peer_id, bytes_uploaded, chunks_served, uploaded_at FROM uploads WHERE cid=? ORDER BY uploaded_at DESC`, cid)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []UploadRecord
+	for rows.Next() {
+		var r UploadRecord
+		if err := rows.Scan(&r.ID, &r.CID, &r.PeerID, &r.BytesUploaded, &r.ChunksServed, &r.UploadedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// GetTotalUploadStats returns aggregated upload statistics
+func (r *Repository) GetTotalUploadStats(ctx context.Context) (totalBytes int64, totalChunks int, uniquePeers int, err error) {
+	err = r.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(bytes_uploaded), 0), COALESCE(SUM(chunks_served), 0), COUNT(DISTINCT peer_id) FROM uploads`).Scan(&totalBytes, &totalChunks, &uniquePeers)
+	return
+}
+
+// GetUploadStatsByCID returns aggregated upload statistics for a specific CID
+func (r *Repository) GetUploadStatsByCID(ctx context.Context, cid string) (totalBytes int64, totalChunks int, uniquePeers int, err error) {
+	err = r.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(bytes_uploaded), 0), COALESCE(SUM(chunks_served), 0), COUNT(DISTINCT peer_id) FROM uploads WHERE cid=?`, cid).Scan(&totalBytes, &totalChunks, &uniquePeers)
+	return
+}

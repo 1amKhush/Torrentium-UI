@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
 	"os"
 	"time"
+
+	"github.com/1amkhush/torrentium/pkg/config"
+	"github.com/1amkhush/torrentium/pkg/logger"
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -17,8 +19,6 @@ import (
 	relayv2client "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
 )
-
-const privKeyFile = "private_key"
 
 func reserveWithRelay(ctx context.Context, relayAddrStr string, h host.Host) error {
 	maddr, err := ma.NewMultiaddr(relayAddrStr)
@@ -36,29 +36,43 @@ func reserveWithRelay(ctx context.Context, relayAddrStr string, h host.Host) err
 	if err != nil {
 		return fmt.Errorf("reservation failed: %w", err)
 	}
-	log.Printf("✅ Reservation with relay successful. Expires at: %v", res.Expiration)
+	logger.Info().
+		Str("relay", relayAddrStr).
+		Time("expires", res.Expiration).
+		Msg("Reservation with relay successful")
 	return nil
 }
+
+// NewHost creates a new libp2p host with the given configuration.
+// If cfg is nil, it uses the global configuration.
 func NewHost(
 	ctx context.Context,
-	listenAddr string,
+	cfg *config.Config,
 	onOffer func(offer, remotePeerID string, s network.Stream) (string, error),
 ) (host.Host, *dht.IpfsDHT, error) {
+	if cfg == nil {
+		cfg = config.Global()
+	}
 
-	//Identity key
-	priv, err := loadOrGeneratePrivateKey()
+	log := logger.WithComponent("p2p")
+
+	// Identity key
+	priv, err := loadOrGeneratePrivateKey(cfg.P2P.PrivateKeyPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load/generate private key: %w", err)
 	}
 
-	// 📡 Local listen address
-	maddr, err := ma.NewMultiaddr(listenAddr)
+	// Local listen address
+	maddr, err := ma.NewMultiaddr(cfg.P2P.ListenAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse listen address '%s': %w", listenAddr, err)
+		return nil, nil, fmt.Errorf("failed to parse listen address '%s': %w", cfg.P2P.ListenAddress, err)
 	}
 
-	// Relay config (static relay on Render)
-	relayAddrStr := "/dns4/relay-torrentium-pj9h.onrender.com/tcp/443/wss/p2p/12D3KooWFXonBdojNuWoe155fAAPjdhqKbL3n2K6i5vW13kgBx9a"
+	// Get first relay (support multiple relays in future)
+	if len(cfg.P2P.RelayAddresses) == 0 {
+		return nil, nil, fmt.Errorf("no relay addresses configured")
+	}
+	relayAddrStr := cfg.P2P.RelayAddresses[0]
 
 	relayMaddr, err := ma.NewMultiaddr(relayAddrStr)
 	if err != nil {
@@ -69,11 +83,11 @@ func NewHost(
 		return nil, nil, fmt.Errorf("invalid relay peer info: %w", err)
 	}
 
-	//Create host with relay + autorelay
+	// Create host with relay + autorelay
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		libp2p.EnableRelay(), // act as relay client
+		libp2p.EnableRelay(),
 		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*relayInfo}),
 		libp2p.EnableHolePunching(),
 	)
@@ -81,108 +95,123 @@ func NewHost(
 		return nil, nil, fmt.Errorf("libp2p peer not initialized: %w", err)
 	}
 
-	//Connect to relay
+	// Connect to relay
 	if err := h.Connect(ctx, *relayInfo); err != nil {
-		return nil, nil, fmt.Errorf("❌ Failed to connect to relay: %w", err)
+		h.Close()
+		return nil, nil, fmt.Errorf("failed to connect to relay: %w", err)
 	}
-	log.Println("✅ Connected to relay")
+	log.Info().Msg("Connected to relay")
 
-	//Reserve relay slot
+	// Reserve relay slot
 	if err := reserveWithRelay(ctx, relayAddrStr, h); err != nil {
-		return nil, nil, fmt.Errorf("❌ Relay reservation failed: %w", err)
+		h.Close()
+		return nil, nil, fmt.Errorf("relay reservation failed: %w", err)
 	}
-	log.Println("✅ Relay reservation successful")
+	log.Info().Msg("Relay reservation successful")
 
-	//DHT setup
+	// DHT setup
 	idht, err := dht.New(ctx, h)
 	if err != nil {
+		h.Close()
 		return nil, nil, fmt.Errorf("failed to initialize DHT: %w", err)
 	}
 	if err := idht.Bootstrap(ctx); err != nil {
+		h.Close()
 		return nil, nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
-	//Register WebRTC signaling protocol (your handler)
+	// Register WebRTC signaling protocol (your handler)
 	RegisterSignalingProtocol(h, onOffer)
 
-	log.Printf("✅ Host created with ID: %s", h.ID())
+	log.Info().
+		Str("peer_id", h.ID().String()).
+		Msg("Host created")
 	for _, addr := range h.Addrs() {
-		log.Printf("🟢 Listening on: %s/p2p/%s", addr, h.ID())
+		log.Info().
+			Str("address", fmt.Sprintf("%s/p2p/%s", addr, h.ID())).
+			Msg("Listening")
 	}
 
 	return h, idht, nil
 }
 
+// NewHostWithDefaults creates a host using the default listen address and global config
+func NewHostWithDefaults(
+	ctx context.Context,
+	onOffer func(offer, remotePeerID string, s network.Stream) (string, error),
+) (host.Host, *dht.IpfsDHT, error) {
+	return NewHost(ctx, nil, onOffer)
+}
+
 func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
-	bootstrapNodes := []string{
-		// Official IPFS bootstrap nodes (mix of DNS and direct IP)
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VCk8JpNUQLoUPF3HfrDAQGS52a8",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX89HWoNT4gEoNA7MzZqaGzyCu5w",
+	return BootstrapWithConfig(ctx, h, d, nil)
+}
 
-		// Direct IP addresses as fallback (more reliable)
-		"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
-		"/ip4/104.236.179.241/tcp/4001/p2p/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM",
-		"/ip4/128.199.219.111/tcp/4001/p2p/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu",
-		"/ip4/104.236.76.40/tcp/4001/p2p/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64",
-
-		// Alternative public nodes
-		"/ip4/147.75.77.187/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-		"/ip6/2604:1380:1000:6000::1/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+// BootstrapWithConfig bootstraps the DHT with the given configuration
+func BootstrapWithConfig(ctx context.Context, h host.Host, d *dht.IpfsDHT, cfg *config.Config) error {
+	if cfg == nil {
+		cfg = config.Global()
 	}
 
-	fmt.Println("Connecting to bootstrap nodes...")
+	log := logger.WithComponent("bootstrap")
+	bootstrapNodes := cfg.P2P.BootstrapNodes
+	minRequired := cfg.P2P.MinBootstrapConnections
+	timeout := cfg.P2P.BootstrapTimeout
+
+	log.Info().Msg("Connecting to bootstrap nodes...")
 	connected := 0
-	required := 5
+
 	for i, addrStr := range bootstrapNodes {
 		// Stop early if we have enough connections
-		if connected >= required {
-			fmt.Printf("Already connected to %d nodes, stopping early\n", connected)
+		if connected >= minRequired {
+			log.Info().Int("count", connected).Msg("Sufficient bootstrap connections established")
 			break
 		}
 
 		addr, err := ma.NewMultiaddr(addrStr)
 		if err != nil {
-			log.Printf("Invalid bootstrap address %s: %v", addrStr, err)
+			log.Warn().Err(err).Str("address", addrStr).Msg("Invalid bootstrap address")
 			continue
 		}
 
 		pi, err := peer.AddrInfoFromP2pAddr(addr)
 		if err != nil {
-			log.Printf("Failed to parse bootstrap peer info %s: %v", addrStr, err)
+			log.Warn().Err(err).Str("address", addrStr).Msg("Failed to parse bootstrap peer info")
 			continue
 		}
 
-		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		connectCtx, cancel := context.WithTimeout(ctx, timeout)
 		if err := h.Connect(connectCtx, *pi); err != nil {
-			//log.Printf("Failed to connect to bootstrap node %s: %v", pi.ID, err)
+			log.Debug().Err(err).Str("peer_id", pi.ID.String()).Msg("Failed to connect to bootstrap node")
 		} else {
-			fmt.Printf("Connected to bootstrap node: %s\n", pi.ID)
+			log.Info().Str("peer_id", pi.ID.String()).Msg("Connected to bootstrap node")
 			connected++
 		}
 		cancel()
 
-		// Added small delay between connections to avoid overwhelming
+		// Small delay between connections to avoid overwhelming
 		if i < len(bootstrapNodes)-1 {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
-	if connected < required {
-		return fmt.Errorf("insufficient bootstrap connections: got %d, need at least %d", connected, required)
+	if connected < minRequired {
+		return fmt.Errorf("insufficient bootstrap connections: got %d, need at least %d", connected, minRequired)
 	}
 
-	fmt.Printf("Successfully connected to %d bootstrap nodes (minimum %d required)\n", connected, required)
+	log.Info().
+		Int("connected", connected).
+		Int("required", minRequired).
+		Msg("Bootstrap connections established")
 
 	// Bootstrap the DHT
-	fmt.Println("Bootstrapping DHT...")
+	log.Info().Msg("Bootstrapping DHT...")
 	if err := d.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
 	// Wait for DHT to become ready with better feedback
-	fmt.Println("Waiting for DHT to become ready...")
+	log.Info().Msg("Waiting for DHT to become ready...")
 	readyTimeout := time.After(45 * time.Second)
 	checkTicker := time.NewTicker(5 * time.Second)
 	defer checkTicker.Stop()
@@ -192,54 +221,60 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 		case <-readyTimeout:
 			routingTableSize := d.RoutingTable().Size()
 			if routingTableSize > 0 {
-				fmt.Printf("DHT partially ready (routing table size: %d), continuing...\n", routingTableSize)
+				log.Info().Int("routing_table_size", routingTableSize).Msg("DHT partially ready, continuing")
 			} else {
-				fmt.Println("DHT bootstrap timeout, but continuing anyway...")
+				log.Warn().Msg("DHT bootstrap timeout, continuing anyway")
 			}
 			return nil
 
 		case <-checkTicker.C:
 			routingTableSize := d.RoutingTable().Size()
-			fmt.Printf("DHT routing table size: %d\n", routingTableSize)
+			log.Debug().Int("routing_table_size", routingTableSize).Msg("DHT routing table status")
 			if routingTableSize >= 10 {
-				fmt.Println("DHT is ready with good routing table!")
+				log.Info().Int("routing_table_size", routingTableSize).Msg("DHT is ready")
 				return nil
 			}
 
 		case <-d.RefreshRoutingTable():
 			routingTableSize := d.RoutingTable().Size()
-			fmt.Printf("DHT routing table refreshed (size: %d)\n", routingTableSize)
+			log.Debug().Int("routing_table_size", routingTableSize).Msg("DHT routing table refreshed")
 			if routingTableSize >= 5 {
-				fmt.Println("DHT is ready!")
+				log.Info().Msg("DHT is ready")
 				return nil
 			}
 		}
 	}
 }
 
-func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
-	privBytes, err := os.ReadFile(privKeyFile)
+func loadOrGeneratePrivateKey(keyPath string) (crypto.PrivKey, error) {
+	if keyPath == "" {
+		keyPath = "private_key"
+	}
+
+	log := logger.WithComponent("crypto")
+
+	privBytes, err := os.ReadFile(keyPath)
 	if os.IsNotExist(err) {
 		priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to generate private key: %w", err)
 		}
 
 		privBytes, err := crypto.MarshalPrivateKey(priv)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to marshal private key: %w", err)
 		}
 
-		if err := os.WriteFile(privKeyFile, privBytes, 0600); err != nil {
+		if err := os.WriteFile(keyPath, privBytes, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write private key to file: %w", err)
 		}
 
-		log.Println("Generated new libp2p private key.")
+		log.Info().Str("path", keyPath).Msg("Generated new libp2p private key")
 		return priv, nil
 	} else if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read private key: %w", err)
 	}
 
-	log.Println("Loaded existing libp2p private key.")
+	log.Info().Str("path", keyPath).Msg("Loaded existing libp2p private key")
 	return crypto.UnmarshalPrivateKey(privBytes)
 }

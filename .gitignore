@@ -1,5 +1,58 @@
+# Private keys - NEVER commit these
+private_key
+*.pem
+*.key
+
+# Database files
+*.db
 peer.db
 
-private_key
+# Download files
+*.download
+*.download.tmp
 
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Config files with secrets
+config.local.yaml
+config.local.toml
+
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Go workspace
+go.work
+go.work.sum
+
+# Logs
+*.log
+logs/
+
+# PDF (original)
 *.pdf
