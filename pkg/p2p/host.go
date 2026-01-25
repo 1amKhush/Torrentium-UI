@@ -68,11 +68,16 @@ func NewHost(
 		return nil, nil, fmt.Errorf("failed to parse listen address '%s': %w", cfg.P2P.ListenAddress, err)
 	}
 
-	// Get first relay (support multiple relays in future)
-	if len(cfg.P2P.RelayAddresses) == 0 {
-		return nil, nil, fmt.Errorf("no relay addresses configured")
+	// Get relay addresses (dynamically if configured)
+	relayAddresses, err := GetRelayAddresses()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get relay addresses: %w", err)
 	}
-	relayAddrStr := cfg.P2P.RelayAddresses[0]
+	if len(relayAddresses) == 0 {
+		return nil, nil, fmt.Errorf("no relay addresses available")
+	}
+	relayAddrStr := relayAddresses[0]
+	log.Info().Str("relay", relayAddrStr).Msg("Using relay address")
 
 	relayMaddr, err := ma.NewMultiaddr(relayAddrStr)
 	if err != nil {

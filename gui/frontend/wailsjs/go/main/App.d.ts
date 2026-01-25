@@ -6,15 +6,25 @@ export function AddFile(arg1:string):Promise<string>;
 
 export function AnnounceFile(arg1:string):Promise<void>;
 
+export function CancelDownload(arg1:string):Promise<void>;
+
+export function CopyMagnetLink(arg1:string):Promise<void>;
+
 export function CopyToClipboard(arg1:string):Promise<void>;
 
 export function DownloadFile(arg1:string):Promise<void>;
+
+export function GenerateMagnetLink(arg1:string):Promise<string>;
 
 export function GetConfig():Promise<main.ConfigData>;
 
 export function GetConnectedPeers():Promise<Array<main.PeerInfo>>;
 
+export function GetDownloadQueue():Promise<Array<main.QueuedDownloadInfo>>;
+
 export function GetDownloads():Promise<Array<main.DownloadInfo>>;
+
+export function GetFilePreview(arg1:string):Promise<main.FilePreviewInfo>;
 
 export function GetInitError():Promise<string>;
 
@@ -28,11 +38,19 @@ export function GetStats():Promise<main.StatsData>;
 
 export function GetUploadProgress():Promise<Array<main.UploadProgressInfo>>;
 
+export function GetWebShareConfig():Promise<main.WebShareConfigData>;
+
 export function IsReady():Promise<boolean>;
 
 export function OpenFileLocation(arg1:string):Promise<void>;
 
+export function PauseDownload(arg1:string):Promise<void>;
+
+export function PublishToWeb(arg1:string,arg2:string,arg3:string,arg4:Array<string>,arg5:string,arg6:number):Promise<main.PublishResponse>;
+
 export function RefreshDHT():Promise<void>;
+
+export function ResumeDownload(arg1:string):Promise<void>;
 
 export function SearchByCID(arg1:string):Promise<number>;
 
@@ -44,6 +62,22 @@ export function SelectDownloadDirectory():Promise<string>;
 
 export function SelectFile():Promise<string>;
 
+export function SetAdaptiveParallelDownloads(arg1:boolean):Promise<void>;
+
+export function SetDownloadBandwidth(arg1:string,arg2:number):Promise<void>;
+
 export function SetDownloadDirectory(arg1:string):Promise<void>;
 
+export function SetDownloadPriority(arg1:string,arg2:number):Promise<void>;
+
+export function SetEndgameMode(arg1:boolean):Promise<void>;
+
+export function SetMaxDownloadRate(arg1:number):Promise<void>;
+
+export function SetMaxParallelDownloads(arg1:number):Promise<void>;
+
 export function SetMaxUploadRate(arg1:number):Promise<void>;
+
+export function SetWebShareConfig(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
+
+export function UnpublishFromWeb(arg1:string):Promise<void>;

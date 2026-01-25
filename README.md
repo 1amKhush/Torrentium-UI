@@ -1,3 +1,13 @@
+export PATH="/c/Users/khush/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin:$PATH" && cd "c:/CODE_HUB/Test/Torrentium/gui" && wails build -platform windows/amd64 2>&1
+
+
+cd "c:/CODE_HUB/Test/Torrentium" && "./gui/build/bin/Torrentium.exe"
+
+
+
+
+
+
 # Torrentium - Decentralized P2P File Sharing System
 
 [![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org/doc/install)
@@ -568,3 +578,5 @@ For issues, questions, or contributions:
 **Torrentium** - Decentralized file sharing made simple 🌐
 
 ![Torrentium Screenshot](docs/screenshot.png)
+
+

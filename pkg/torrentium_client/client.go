@@ -128,6 +128,12 @@ type Client struct {
 	uploadProgress   map[string]*UploadStats
 	uploadProgressMu sync.RWMutex
 	maxUploadRate    int64 // bytes per second, 0 = unlimited
+	// Download queue management
+	downloadQueue      *DownloadQueue
+	adaptiveManager    *AdaptiveDownloadManager
+	endgameManager     *EndgameManager
+	checkpointer       *DownloadCheckpointer
+	dhtRetryHelper     *DHTRetryHelper
 }
 
 type FileInfo struct {
@@ -207,8 +213,51 @@ func NewClient(h host.Host, d *dht.IpfsDHT, repo *db.Repository) *Client {
 		uploadProgress:  make(map[string]*UploadStats),
 		maxUploadRate:   cfg.Client.MaxUploadRate,
 	}
+
+	// Initialize download queue with configured max parallel downloads
+	c.downloadQueue = NewDownloadQueue(cfg.Client.MaxParallelDownloads)
+	c.downloadQueue.SetCallbacks(
+		func(cid string, status DownloadStatus) {
+			log := logger.WithComponent("download_queue")
+			log.Info().Str("cid", cid).Str("status", string(status)).Msg("Download status changed")
+		},
+		nil, nil, nil,
+	)
+
+	// Initialize adaptive download manager (uses config internally)
+	c.adaptiveManager = NewAdaptiveDownloadManager()
+
+	// Initialize endgame manager (uses config internally)
+	c.endgameManager = NewEndgameManager()
+
+	// Initialize DHT retry helper (uses config internally)
+	c.dhtRetryHelper = NewDHTRetryHelper()
+
+	// Initialize download checkpointer (uses config internally)
+	c.checkpointer = NewDownloadCheckpointer()
+
 	go c.monitorCongestion()
 	return c
+}
+
+// GetDownloadQueue returns the download queue for management
+func (c *Client) GetDownloadQueue() *DownloadQueue {
+	return c.downloadQueue
+}
+
+// SetAdaptiveDownloadsEnabled enables or disables adaptive parallel downloads
+func (c *Client) SetAdaptiveDownloadsEnabled(enabled bool) {
+	c.adaptiveManager.SetEnabled(enabled)
+}
+
+// SetEndgameModeEnabled enables or disables endgame mode
+func (c *Client) SetEndgameModeEnabled(enabled bool) {
+	c.endgameManager.SetEnabled(enabled)
+}
+
+// SetMaxDownloadRate sets the maximum download rate in bytes per second
+func (c *Client) SetMaxDownloadRate(rate int64) {
+	c.adaptiveManager.SetMaxBandwidth(rate)
 }
 
 // SetMaxUploadRate sets the maximum upload rate in bytes per second.
@@ -235,6 +284,16 @@ func (c *Client) GetMaxUploadRate() int64 {
 func (c *Client) Close() error {
 	log := logger.WithComponent("client")
 	log.Info().Msg("Shutting down client...")
+
+	// Stop adaptive download manager
+	if c.adaptiveManager != nil {
+		c.adaptiveManager.Stop()
+	}
+
+	// Clear download queue
+	if c.downloadQueue != nil {
+		c.downloadQueue.Clear()
+	}
 
 	// Close all WebRTC peer connections
 	c.peersMux.Lock()
@@ -948,7 +1007,7 @@ func (c *Client) DownloadFile(cidStr string) error {
 	}
 
 	fmt.Printf("Found %d providers. Getting file manifest...\n", len(providers))
-	relayAddrStr := "/dns4/relay-torrentium-pj9h.onrender.com/tcp/443/wss/p2p/12D3KooWKdKpMeZwPjFCmfrgyw7VnoFGeeFPXjjiPZCr1XXz3mCg"
+	relayAddrStr := "/dns4/relay-torrentium-pj9h.onrender.com/tcp/443/wss/p2p/12D3KooWQmD64vYYegz3GVDHtt4KeqkSuBSYoLwGMircrv1Q1TdW"
 
 	var manifest controlMessage
 	var firstPeer *webRTC.SimpleWebRTCPeer

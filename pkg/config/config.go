@@ -29,6 +29,24 @@ type Config struct {
 
 	// Logging configuration
 	Logging LoggingConfig `yaml:"logging"`
+
+	// WebShare configuration for the web share portal
+	WebShare WebShareConfig `yaml:"webshare"`
+}
+
+// WebShareConfig holds configuration for the web share portal
+type WebShareConfig struct {
+	// PortalURL is the URL of the web share portal server
+	PortalURL string `yaml:"portal_url"`
+
+	// APIKey is the optional API key for publishing to the portal
+	APIKey string `yaml:"api_key"`
+
+	// DefaultVisibility is the default visibility for published files (public/unlisted)
+	DefaultVisibility string `yaml:"default_visibility"`
+
+	// DefaultExpiration is the default expiration time in hours (0 = never)
+	DefaultExpiration int `yaml:"default_expiration"`
 }
 
 // P2PConfig holds P2P network configuration
@@ -39,7 +57,11 @@ type P2PConfig struct {
 	// PrivateKeyPath is the path to the private key file (default: private_key)
 	PrivateKeyPath string `yaml:"private_key_path"`
 
+	// RelayHTTPURL is the HTTP URL to fetch relay info (peer ID) dynamically
+	RelayHTTPURL string `yaml:"relay_http_url"`
+
 	// RelayAddresses are the circuit relay servers to use for NAT traversal
+	// If RelayHTTPURL is set, these are fetched dynamically and cached
 	RelayAddresses []string `yaml:"relay_addresses"`
 
 	// BootstrapNodes are the initial nodes to connect to for DHT bootstrap
@@ -115,6 +137,12 @@ type ClientConfig struct {
 	// MaxParallelDownloads is the maximum number of parallel piece downloads
 	MaxParallelDownloads int `yaml:"max_parallel_downloads"`
 
+	// MinParallelDownloads is the minimum number of parallel downloads for adaptive mode
+	MinParallelDownloads int `yaml:"min_parallel_downloads"`
+
+	// AdaptiveParallelDownloads enables automatic adjustment based on bandwidth
+	AdaptiveParallelDownloads bool `yaml:"adaptive_parallel_downloads"`
+
 	// PieceTimeout is the timeout for downloading a single piece
 	PieceTimeout time.Duration `yaml:"piece_timeout"`
 
@@ -124,8 +152,35 @@ type ClientConfig struct {
 	// MaxUploadRate is the maximum upload rate in bytes/sec (0 = unlimited)
 	MaxUploadRate int64 `yaml:"max_upload_rate"`
 
+	// MaxDownloadRate is the maximum download rate in bytes/sec (0 = unlimited)
+	MaxDownloadRate int64 `yaml:"max_download_rate"`
+
 	// DownloadDirectory is the default directory for downloads
 	DownloadDirectory string `yaml:"download_directory"`
+
+	// CheckpointInterval is how often to save download state (number of pieces)
+	CheckpointInterval int `yaml:"checkpoint_interval"`
+
+	// EnableEndgameMode enables requesting last pieces from multiple peers
+	EnableEndgameMode bool `yaml:"enable_endgame_mode"`
+
+	// EndgameThreshold is the percentage of pieces remaining to trigger endgame
+	EndgameThreshold float64 `yaml:"endgame_threshold"`
+
+	// MaxConnectionPoolSize is the maximum number of pooled WebRTC connections
+	MaxConnectionPoolSize int `yaml:"max_connection_pool_size"`
+
+	// ConnectionPoolIdleTimeout is how long idle connections stay in pool
+	ConnectionPoolIdleTimeout time.Duration `yaml:"connection_pool_idle_timeout"`
+
+	// DHTRetryAttempts is the number of retry attempts for DHT operations
+	DHTRetryAttempts int `yaml:"dht_retry_attempts"`
+
+	// DHTRetryBackoffBase is the base duration for exponential backoff
+	DHTRetryBackoffBase time.Duration `yaml:"dht_retry_backoff_base"`
+
+	// DHTRetryBackoffMax is the maximum backoff duration
+	DHTRetryBackoffMax time.Duration `yaml:"dht_retry_backoff_max"`
 }
 
 // LoggingConfig holds logging configuration
@@ -155,8 +210,9 @@ func DefaultConfig() *Config {
 		P2P: P2PConfig{
 			ListenAddress:  "/ip4/0.0.0.0/tcp/0",
 			PrivateKeyPath: "private_key",
+			RelayHTTPURL:   "",
 			RelayAddresses: []string{
-				"/dns4/relay-torrentium-pj9h.onrender.com/tcp/443/wss/p2p/12D3KooWKdKpMeZwPjFCmfrgyw7VnoFGeeFPXjjiPZCr1XXz3mCg",
+				"/dns4/relay-torrentium-pj9h.onrender.com/tcp/443/wss/p2p/12D3KooWQmD64vYYegz3GVDHtt4KeqkSuBSYoLwGMircrv1Q1TdW",
 			},
 			BootstrapNodes: []string{
 				"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -192,20 +248,37 @@ func DefaultConfig() *Config {
 			ConnMaxIdleTime: 5 * time.Minute,
 		},
 		Client: ClientConfig{
-			DefaultPieceSize:      1 << 20, // 1 MiB
-			MaxProviders:          10,
-			MaxChunkSize:          16 * 1024, // 16 KiB
-			MaxParallelDownloads:  3,
-			PieceTimeout:          300 * time.Second,
-			RetransmissionTimeout: 5 * time.Second,
-			MaxUploadRate:         0,
-			DownloadDirectory:     ".",
+			DefaultPieceSize:          1 << 20, // 1 MiB
+			MaxProviders:              10,
+			MaxChunkSize:              16 * 1024, // 16 KiB
+			MaxParallelDownloads:      3,
+			MinParallelDownloads:      1,
+			AdaptiveParallelDownloads: true,
+			PieceTimeout:              300 * time.Second,
+			RetransmissionTimeout:     5 * time.Second,
+			MaxUploadRate:             0,
+			MaxDownloadRate:           0,
+			DownloadDirectory:         ".",
+			CheckpointInterval:        5, // Save state every 5 pieces
+			EnableEndgameMode:         true,
+			EndgameThreshold:          0.05, // Last 5% of pieces
+			MaxConnectionPoolSize:     20,
+			ConnectionPoolIdleTimeout: 5 * time.Minute,
+			DHTRetryAttempts:          3,
+			DHTRetryBackoffBase:       1 * time.Second,
+			DHTRetryBackoffMax:        30 * time.Second,
 		},
 		Logging: LoggingConfig{
 			Level:        "info",
 			Format:       "console",
 			Output:       "stdout",
 			EnableCaller: false,
+		},
+		WebShare: WebShareConfig{
+			PortalURL:         "https://share.torrentium.io",
+			APIKey:            "",
+			DefaultVisibility: "public",
+			DefaultExpiration: 0,
 		},
 	}
 }

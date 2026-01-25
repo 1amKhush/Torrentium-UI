@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,11 +103,75 @@ type UploadProgressInfo struct {
 
 // ConfigData represents configuration for the GUI
 type ConfigData struct {
-	DownloadDir        string `json:"downloadDir"`
-	MaxUploadRate      int64  `json:"maxUploadRate"`
-	MaxUploadRateHuman string `json:"maxUploadRateHuman"`
-	LogLevel           string `json:"logLevel"`
-	DatabasePath       string `json:"databasePath"`
+	DownloadDir               string `json:"downloadDir"`
+	MaxUploadRate             int64  `json:"maxUploadRate"`
+	MaxUploadRateHuman        string `json:"maxUploadRateHuman"`
+	MaxDownloadRate           int64  `json:"maxDownloadRate"`
+	MaxDownloadRateHuman      string `json:"maxDownloadRateHuman"`
+	MaxParallelDownloads      int    `json:"maxParallelDownloads"`
+	AdaptiveParallelDownloads bool   `json:"adaptiveParallelDownloads"`
+	EnableEndgameMode         bool   `json:"enableEndgameMode"`
+	LogLevel                  string `json:"logLevel"`
+	DatabasePath              string `json:"databasePath"`
+}
+
+// QueuedDownloadInfo represents a download in the queue for GUI
+type QueuedDownloadInfo struct {
+	CID             string  `json:"cid"`
+	Status          string  `json:"status"`
+	Priority        int     `json:"priority"`
+	Progress        float64 `json:"progress"`
+	BytesDownloaded int64   `json:"bytesDownloaded"`
+	TotalBytes      int64   `json:"totalBytes"`
+	PiecesCompleted int     `json:"piecesCompleted"`
+	TotalPieces     int     `json:"totalPieces"`
+	Speed           float64 `json:"speed"`
+	SpeedHuman      string  `json:"speedHuman"`
+	ETA             string  `json:"eta"`
+	MaxBandwidth    int64   `json:"maxBandwidth"`
+	Error           string  `json:"error"`
+	AddedAt         string  `json:"addedAt"`
+}
+
+// FilePreviewInfo represents preview data for a file
+type FilePreviewInfo struct {
+	CID         string `json:"cid"`
+	Filename    string `json:"filename"`
+	FileType    string `json:"fileType"`
+	FileSize    int64  `json:"fileSize"`
+	SizeHuman   string `json:"sizeHuman"`
+	IsPreviewable bool `json:"isPreviewable"`
+	PreviewURL  string `json:"previewUrl,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// WebShareConfig represents web share configuration for the GUI
+type WebShareConfigData struct {
+	PortalURL         string `json:"portalUrl"`
+	APIKey            string `json:"apiKey"`
+	DefaultVisibility string `json:"defaultVisibility"`
+	DefaultExpiration int    `json:"defaultExpiration"`
+}
+
+// PublishRequest represents the request to publish a file to web share
+type PublishRequest struct {
+	CID         string   `json:"cid"`
+	Filename    string   `json:"filename"`
+	FileSize    int64    `json:"fileSize"`
+	Description string   `json:"description"`
+	Category    string   `json:"category"`
+	Tags        []string `json:"tags"`
+	Visibility  string   `json:"visibility"`
+	ExpiresIn   int      `json:"expiresIn"`
+}
+
+// PublishResponse represents the response from publishing a file
+type PublishResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	MagnetLink string `json:"magnetLink,omitempty"`
+	ShareURL   string `json:"shareUrl,omitempty"`
+	FileID     string `json:"fileId,omitempty"`
 }
 
 // ========== App Struct ==========
@@ -481,21 +551,32 @@ func (a *App) GetConfig() ConfigData {
 		cfg = config.DefaultConfig()
 	}
 
-	maxRate := int64(0)
-	maxRateHuman := "Unlimited"
+	maxUploadRate := int64(0)
+	maxUploadRateHuman := "Unlimited"
 	if a.client != nil {
-		maxRate = a.client.GetMaxUploadRate()
-		if maxRate > 0 {
-			maxRateHuman = humanize.Bytes(uint64(maxRate)) + "/s"
+		maxUploadRate = a.client.GetMaxUploadRate()
+		if maxUploadRate > 0 {
+			maxUploadRateHuman = humanize.Bytes(uint64(maxUploadRate)) + "/s"
 		}
 	}
 
+	maxDownloadRate := cfg.Client.MaxDownloadRate
+	maxDownloadRateHuman := "Unlimited"
+	if maxDownloadRate > 0 {
+		maxDownloadRateHuman = humanize.Bytes(uint64(maxDownloadRate)) + "/s"
+	}
+
 	return ConfigData{
-		DownloadDir:        cfg.Client.DownloadDirectory,
-		MaxUploadRate:      maxRate,
-		MaxUploadRateHuman: maxRateHuman,
-		LogLevel:           cfg.Logging.Level,
-		DatabasePath:       cfg.Database.Path,
+		DownloadDir:               cfg.Client.DownloadDirectory,
+		MaxUploadRate:             maxUploadRate,
+		MaxUploadRateHuman:        maxUploadRateHuman,
+		MaxDownloadRate:           maxDownloadRate,
+		MaxDownloadRateHuman:      maxDownloadRateHuman,
+		MaxParallelDownloads:      cfg.Client.MaxParallelDownloads,
+		AdaptiveParallelDownloads: cfg.Client.AdaptiveParallelDownloads,
+		EnableEndgameMode:         cfg.Client.EnableEndgameMode,
+		LogLevel:                  cfg.Logging.Level,
+		DatabasePath:              cfg.Database.Path,
 	}
 }
 
@@ -674,4 +755,497 @@ func (a *App) RefreshDHT() error {
 		return fmt.Errorf("client not ready")
 	}
 	return a.dht.Bootstrap(context.Background())
+}
+
+// ========== Download Queue Methods ==========
+
+// GetDownloadQueue returns all downloads in the queue
+func (a *App) GetDownloadQueue() []QueuedDownloadInfo {
+	if !a.IsReady() || a.client == nil {
+		return nil
+	}
+
+	queue := a.client.GetDownloadQueue()
+	if queue == nil {
+		return nil
+	}
+
+	downloads := queue.GetAll()
+	result := make([]QueuedDownloadInfo, 0, len(downloads))
+
+	for _, dl := range downloads {
+		info := dl.GetInfo()
+		speedHuman := "0 B/s"
+		if info.Speed > 0 {
+			speedHuman = humanize.Bytes(uint64(info.Speed)) + "/s"
+		}
+		eta := "N/A"
+		if info.ETA > 0 {
+			eta = info.ETA.Round(time.Second).String()
+		}
+
+		result = append(result, QueuedDownloadInfo{
+			CID:             info.CID,
+			Status:          string(info.Status),
+			Priority:        int(info.Priority),
+			Progress:        info.Progress,
+			BytesDownloaded: info.BytesDownloaded,
+			TotalBytes:      info.TotalBytes,
+			PiecesCompleted: info.PiecesCompleted,
+			TotalPieces:     info.TotalPieces,
+			Speed:           info.Speed,
+			SpeedHuman:      speedHuman,
+			ETA:             eta,
+			MaxBandwidth:    info.MaxBandwidth,
+			Error:           info.Error,
+			AddedAt:         info.AddedAt.Format("2006-01-02 15:04"),
+		})
+	}
+	return result
+}
+
+// PauseDownload pauses a download
+func (a *App) PauseDownload(cid string) error {
+	if !a.IsReady() || a.client == nil {
+		return fmt.Errorf("client not ready")
+	}
+	queue := a.client.GetDownloadQueue()
+	if queue == nil {
+		return fmt.Errorf("download queue not initialized")
+	}
+	err := queue.Pause(cid)
+	if err == nil {
+		runtime.EventsEmit(a.ctx, "downloadPaused", cid)
+	}
+	return err
+}
+
+// ResumeDownload resumes a paused download
+func (a *App) ResumeDownload(cid string) error {
+	if !a.IsReady() || a.client == nil {
+		return fmt.Errorf("client not ready")
+	}
+	queue := a.client.GetDownloadQueue()
+	if queue == nil {
+		return fmt.Errorf("download queue not initialized")
+	}
+	err := queue.Resume(cid)
+	if err == nil {
+		runtime.EventsEmit(a.ctx, "downloadResumed", cid)
+	}
+	return err
+}
+
+// CancelDownload cancels a download
+func (a *App) CancelDownload(cid string) error {
+	if !a.IsReady() || a.client == nil {
+		return fmt.Errorf("client not ready")
+	}
+	queue := a.client.GetDownloadQueue()
+	if queue == nil {
+		return fmt.Errorf("download queue not initialized")
+	}
+	err := queue.Remove(cid)
+	if err == nil {
+		runtime.EventsEmit(a.ctx, "downloadCancelled", cid)
+	}
+	return err
+}
+
+// SetDownloadPriority sets the priority of a download
+func (a *App) SetDownloadPriority(cid string, priority int) error {
+	if !a.IsReady() || a.client == nil {
+		return fmt.Errorf("client not ready")
+	}
+	queue := a.client.GetDownloadQueue()
+	if queue == nil {
+		return fmt.Errorf("download queue not initialized")
+	}
+	return queue.SetPriority(cid, torrentium_client.DownloadPriority(priority))
+}
+
+// SetDownloadBandwidth sets the bandwidth limit for a specific download
+func (a *App) SetDownloadBandwidth(cid string, bytesPerSecond int64) error {
+	if !a.IsReady() || a.client == nil {
+		return fmt.Errorf("client not ready")
+	}
+	queue := a.client.GetDownloadQueue()
+	if queue == nil {
+		return fmt.Errorf("download queue not initialized")
+	}
+	return queue.SetBandwidth(cid, bytesPerSecond)
+}
+
+// ========== Enhanced Settings Methods ==========
+
+// SetMaxParallelDownloads sets the maximum parallel downloads
+func (a *App) SetMaxParallelDownloads(max int) error {
+	cfg := config.Global()
+	if cfg == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	if max < 1 {
+		return fmt.Errorf("max parallel downloads must be at least 1")
+	}
+	cfg.Client.MaxParallelDownloads = max
+	
+	if a.client != nil {
+		queue := a.client.GetDownloadQueue()
+		if queue != nil {
+			queue.SetMaxConcurrent(max)
+		}
+	}
+	
+	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
+	return nil
+}
+
+// SetAdaptiveParallelDownloads enables/disables adaptive parallel downloads
+func (a *App) SetAdaptiveParallelDownloads(enabled bool) error {
+	cfg := config.Global()
+	if cfg == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	cfg.Client.AdaptiveParallelDownloads = enabled
+	
+	if a.client != nil {
+		a.client.SetAdaptiveDownloadsEnabled(enabled)
+	}
+	
+	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
+	return nil
+}
+
+// SetEndgameMode enables/disables endgame mode
+func (a *App) SetEndgameMode(enabled bool) error {
+	cfg := config.Global()
+	if cfg == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	cfg.Client.EnableEndgameMode = enabled
+	
+	if a.client != nil {
+		a.client.SetEndgameModeEnabled(enabled)
+	}
+	
+	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
+	return nil
+}
+
+// SetMaxDownloadRate sets the maximum download rate
+func (a *App) SetMaxDownloadRate(rate int64) error {
+	cfg := config.Global()
+	if cfg == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	cfg.Client.MaxDownloadRate = rate
+	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
+	return nil
+}
+
+// ========== File Preview Methods ==========
+
+// GetFilePreview returns preview information for a file
+func (a *App) GetFilePreview(cid string) (*FilePreviewInfo, error) {
+	if !a.IsReady() {
+		return nil, fmt.Errorf("client not ready")
+	}
+
+	// Get file info from local files or manifest
+	ctx := context.Background()
+	localFile, err := a.repo.GetLocalFileByCID(ctx, cid)
+	if err != nil {
+		return nil, fmt.Errorf("file not found: %w", err)
+	}
+
+	preview := &FilePreviewInfo{
+		CID:       cid,
+		Filename:  localFile.Filename,
+		FileSize:  localFile.FileSize,
+		SizeHuman: humanize.Bytes(uint64(localFile.FileSize)),
+	}
+
+	// Determine file type and if it's previewable
+	ext := filepath.Ext(localFile.Filename)
+	preview.FileType = getFileCategory(ext)
+	preview.MimeType = getMimeType(ext)
+	preview.IsPreviewable = isPreviewable(ext)
+
+	// If it's previewable and local, generate preview URL
+	if preview.IsPreviewable && localFile.FilePath != "" {
+		preview.PreviewURL = "file:///" + filepath.ToSlash(localFile.FilePath)
+	}
+
+	return preview, nil
+}
+
+// Helper function to categorize file types
+func getFileCategory(ext string) string {
+	ext = strings.ToLower(ext)
+	imageExts := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".svg": true, ".bmp": true}
+	videoExts := map[string]bool{".mp4": true, ".webm": true, ".mkv": true, ".avi": true, ".mov": true}
+	audioExts := map[string]bool{".mp3": true, ".wav": true, ".ogg": true, ".flac": true, ".aac": true}
+	documentExts := map[string]bool{".pdf": true, ".txt": true, ".md": true, ".doc": true, ".docx": true}
+
+	if imageExts[ext] {
+		return "image"
+	}
+	if videoExts[ext] {
+		return "video"
+	}
+	if audioExts[ext] {
+		return "audio"
+	}
+	if documentExts[ext] {
+		return "document"
+	}
+	return "other"
+}
+
+// Helper function to get MIME type
+func getMimeType(ext string) string {
+	mimeTypes := map[string]string{
+		".jpg":  "image/jpeg",
+		".jpeg": "image/jpeg",
+		".png":  "image/png",
+		".gif":  "image/gif",
+		".webp": "image/webp",
+		".svg":  "image/svg+xml",
+		".mp4":  "video/mp4",
+		".webm": "video/webm",
+		".mp3":  "audio/mpeg",
+		".wav":  "audio/wav",
+		".pdf":  "application/pdf",
+		".txt":  "text/plain",
+		".md":   "text/markdown",
+	}
+	if mime, ok := mimeTypes[strings.ToLower(ext)]; ok {
+		return mime
+	}
+	return "application/octet-stream"
+}
+
+// Helper function to determine if a file is previewable
+func isPreviewable(ext string) bool {
+	previewable := map[string]bool{
+		".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".svg": true,
+		".mp4": true, ".webm": true,
+		".mp3": true, ".wav": true, ".ogg": true,
+		".pdf": true, ".txt": true, ".md": true,
+	}
+	return previewable[strings.ToLower(ext)]
+}
+
+// ========== Web Share Portal Methods ==========
+
+// GetWebShareConfig returns the current web share configuration
+func (a *App) GetWebShareConfig() WebShareConfigData {
+	cfg := config.Global()
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+
+	return WebShareConfigData{
+		PortalURL:         cfg.WebShare.PortalURL,
+		APIKey:            cfg.WebShare.APIKey,
+		DefaultVisibility: cfg.WebShare.DefaultVisibility,
+		DefaultExpiration: cfg.WebShare.DefaultExpiration,
+	}
+}
+
+// SetWebShareConfig updates the web share configuration
+func (a *App) SetWebShareConfig(portalURL, apiKey, defaultVisibility string, defaultExpiration int) error {
+	cfg := config.Global()
+	if cfg == nil {
+		return fmt.Errorf("config not initialized")
+	}
+
+	cfg.WebShare.PortalURL = portalURL
+	cfg.WebShare.APIKey = apiKey
+	cfg.WebShare.DefaultVisibility = defaultVisibility
+	cfg.WebShare.DefaultExpiration = defaultExpiration
+
+	runtime.EventsEmit(a.ctx, "webShareConfigUpdated", a.GetWebShareConfig())
+	return nil
+}
+
+// PublishToWeb publishes a file to the web share portal
+func (a *App) PublishToWeb(cid, description, category string, tags []string, visibility string, expiresIn int) (*PublishResponse, error) {
+	if !a.IsReady() {
+		return nil, fmt.Errorf("client not ready")
+	}
+
+	cfg := config.Global()
+	if cfg == nil || cfg.WebShare.PortalURL == "" {
+		return nil, fmt.Errorf("web share portal not configured")
+	}
+
+	// Get file info from local files
+	ctx := context.Background()
+	localFile, err := a.repo.GetLocalFileByCID(ctx, cid)
+	if err != nil {
+		return nil, fmt.Errorf("file not found: %w", err)
+	}
+
+	// Use defaults if not specified
+	if visibility == "" {
+		visibility = cfg.WebShare.DefaultVisibility
+	}
+	if expiresIn == 0 && cfg.WebShare.DefaultExpiration > 0 {
+		expiresIn = cfg.WebShare.DefaultExpiration
+	}
+
+	// Prepare publish request
+	publishReq := map[string]interface{}{
+		"cid":         cid,
+		"filename":    localFile.Filename,
+		"fileSize":    localFile.FileSize,
+		"description": description,
+		"category":    category,
+		"tags":        tags,
+		"visibility":  visibility,
+		"publisherId": a.host.ID().String(),
+	}
+	if expiresIn > 0 {
+		publishReq["expiresIn"] = expiresIn
+	}
+
+	// Marshal request body
+	reqBody, err := json.Marshal(publishReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare request: %w", err)
+	}
+
+	// Create HTTP request
+	apiURL := strings.TrimSuffix(cfg.WebShare.PortalURL, "/") + "/api/v1/publish"
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.WebShare.APIKey != "" {
+		req.Header.Set("X-API-Key", cfg.WebShare.APIKey)
+	}
+
+	// Send request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to publish: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Parse response
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		errMsg := "publishing failed"
+		if e, ok := result["error"].(string); ok {
+			errMsg = e
+		}
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	// Build response
+	response := &PublishResponse{
+		Success: true,
+		Message: "File published successfully",
+	}
+
+	if ml, ok := result["magnetLink"].(string); ok {
+		response.MagnetLink = ml
+	}
+	if su, ok := result["shareUrl"].(string); ok {
+		response.ShareURL = cfg.WebShare.PortalURL + su
+	}
+	if file, ok := result["file"].(map[string]interface{}); ok {
+		if id, ok := file["id"].(string); ok {
+			response.FileID = id
+		}
+	}
+
+	runtime.EventsEmit(a.ctx, "filePublished", map[string]string{
+		"cid":        cid,
+		"magnetLink": response.MagnetLink,
+		"shareUrl":   response.ShareURL,
+	})
+
+	return response, nil
+}
+
+// UnpublishFromWeb removes a file from the web share portal
+func (a *App) UnpublishFromWeb(cid string) error {
+	cfg := config.Global()
+	if cfg == nil || cfg.WebShare.PortalURL == "" {
+		return fmt.Errorf("web share portal not configured")
+	}
+
+	ctx := context.Background()
+	apiURL := strings.TrimSuffix(cfg.WebShare.PortalURL, "/") + "/api/v1/publish/" + cid
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if cfg.WebShare.APIKey != "" {
+		req.Header.Set("X-API-Key", cfg.WebShare.APIKey)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to unpublish: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to unpublish file")
+	}
+
+	runtime.EventsEmit(a.ctx, "fileUnpublished", cid)
+	return nil
+}
+
+// GenerateMagnetLink generates a Torrentium magnet link for a file
+func (a *App) GenerateMagnetLink(cid string) (string, error) {
+	if !a.IsReady() {
+		return "", fmt.Errorf("client not ready")
+	}
+
+	ctx := context.Background()
+	localFile, err := a.repo.GetLocalFileByCID(ctx, cid)
+	if err != nil {
+		return "", fmt.Errorf("file not found: %w", err)
+	}
+
+	// Format: torrentium://<cid>?dn=<filename>&sz=<size>
+	magnetLink := fmt.Sprintf("torrentium://%s?dn=%s&sz=%d",
+		cid,
+		url.QueryEscape(localFile.Filename),
+		localFile.FileSize,
+	)
+
+	return magnetLink, nil
+}
+
+// CopyMagnetLink generates and copies a magnet link to clipboard
+func (a *App) CopyMagnetLink(cid string) error {
+	magnetLink, err := a.GenerateMagnetLink(cid)
+	if err != nil {
+		return err
+	}
+
+	runtime.ClipboardSetText(a.ctx, magnetLink)
+	return nil
 }

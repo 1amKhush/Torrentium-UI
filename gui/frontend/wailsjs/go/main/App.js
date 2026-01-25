@@ -10,12 +10,24 @@ export function AnnounceFile(arg1) {
   return window['go']['main']['App']['AnnounceFile'](arg1);
 }
 
+export function CancelDownload(arg1) {
+  return window['go']['main']['App']['CancelDownload'](arg1);
+}
+
+export function CopyMagnetLink(arg1) {
+  return window['go']['main']['App']['CopyMagnetLink'](arg1);
+}
+
 export function CopyToClipboard(arg1) {
   return window['go']['main']['App']['CopyToClipboard'](arg1);
 }
 
 export function DownloadFile(arg1) {
   return window['go']['main']['App']['DownloadFile'](arg1);
+}
+
+export function GenerateMagnetLink(arg1) {
+  return window['go']['main']['App']['GenerateMagnetLink'](arg1);
 }
 
 export function GetConfig() {
@@ -26,8 +38,16 @@ export function GetConnectedPeers() {
   return window['go']['main']['App']['GetConnectedPeers']();
 }
 
+export function GetDownloadQueue() {
+  return window['go']['main']['App']['GetDownloadQueue']();
+}
+
 export function GetDownloads() {
   return window['go']['main']['App']['GetDownloads']();
+}
+
+export function GetFilePreview(arg1) {
+  return window['go']['main']['App']['GetFilePreview'](arg1);
 }
 
 export function GetInitError() {
@@ -54,6 +74,10 @@ export function GetUploadProgress() {
   return window['go']['main']['App']['GetUploadProgress']();
 }
 
+export function GetWebShareConfig() {
+  return window['go']['main']['App']['GetWebShareConfig']();
+}
+
 export function IsReady() {
   return window['go']['main']['App']['IsReady']();
 }
@@ -62,8 +86,20 @@ export function OpenFileLocation(arg1) {
   return window['go']['main']['App']['OpenFileLocation'](arg1);
 }
 
+export function PauseDownload(arg1) {
+  return window['go']['main']['App']['PauseDownload'](arg1);
+}
+
+export function PublishToWeb(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['PublishToWeb'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
 export function RefreshDHT() {
   return window['go']['main']['App']['RefreshDHT']();
+}
+
+export function ResumeDownload(arg1) {
+  return window['go']['main']['App']['ResumeDownload'](arg1);
 }
 
 export function SearchByCID(arg1) {
@@ -86,10 +122,42 @@ export function SelectFile() {
   return window['go']['main']['App']['SelectFile']();
 }
 
+export function SetAdaptiveParallelDownloads(arg1) {
+  return window['go']['main']['App']['SetAdaptiveParallelDownloads'](arg1);
+}
+
+export function SetDownloadBandwidth(arg1, arg2) {
+  return window['go']['main']['App']['SetDownloadBandwidth'](arg1, arg2);
+}
+
 export function SetDownloadDirectory(arg1) {
   return window['go']['main']['App']['SetDownloadDirectory'](arg1);
 }
 
+export function SetDownloadPriority(arg1, arg2) {
+  return window['go']['main']['App']['SetDownloadPriority'](arg1, arg2);
+}
+
+export function SetEndgameMode(arg1) {
+  return window['go']['main']['App']['SetEndgameMode'](arg1);
+}
+
+export function SetMaxDownloadRate(arg1) {
+  return window['go']['main']['App']['SetMaxDownloadRate'](arg1);
+}
+
+export function SetMaxParallelDownloads(arg1) {
+  return window['go']['main']['App']['SetMaxParallelDownloads'](arg1);
+}
+
 export function SetMaxUploadRate(arg1) {
   return window['go']['main']['App']['SetMaxUploadRate'](arg1);
+}
+
+export function SetWebShareConfig(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetWebShareConfig'](arg1, arg2, arg3, arg4);
+}
+
+export function UnpublishFromWeb(arg1) {
+  return window['go']['main']['App']['UnpublishFromWeb'](arg1);
 }
