@@ -135,14 +135,14 @@ type QueuedDownloadInfo struct {
 
 // FilePreviewInfo represents preview data for a file
 type FilePreviewInfo struct {
-	CID         string `json:"cid"`
-	Filename    string `json:"filename"`
-	FileType    string `json:"fileType"`
-	FileSize    int64  `json:"fileSize"`
-	SizeHuman   string `json:"sizeHuman"`
-	IsPreviewable bool `json:"isPreviewable"`
-	PreviewURL  string `json:"previewUrl,omitempty"`
-	MimeType    string `json:"mimeType,omitempty"`
+	CID           string `json:"cid"`
+	Filename      string `json:"filename"`
+	FileType      string `json:"fileType"`
+	FileSize      int64  `json:"fileSize"`
+	SizeHuman     string `json:"sizeHuman"`
+	IsPreviewable bool   `json:"isPreviewable"`
+	PreviewURL    string `json:"previewUrl,omitempty"`
+	MimeType      string `json:"mimeType,omitempty"`
 }
 
 // WebShareConfig represents web share configuration for the GUI
@@ -888,14 +888,14 @@ func (a *App) SetMaxParallelDownloads(max int) error {
 		return fmt.Errorf("max parallel downloads must be at least 1")
 	}
 	cfg.Client.MaxParallelDownloads = max
-	
+
 	if a.client != nil {
 		queue := a.client.GetDownloadQueue()
 		if queue != nil {
 			queue.SetMaxConcurrent(max)
 		}
 	}
-	
+
 	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
 	return nil
 }
@@ -907,11 +907,11 @@ func (a *App) SetAdaptiveParallelDownloads(enabled bool) error {
 		return fmt.Errorf("config not initialized")
 	}
 	cfg.Client.AdaptiveParallelDownloads = enabled
-	
+
 	if a.client != nil {
 		a.client.SetAdaptiveDownloadsEnabled(enabled)
 	}
-	
+
 	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
 	return nil
 }
@@ -923,11 +923,11 @@ func (a *App) SetEndgameMode(enabled bool) error {
 		return fmt.Errorf("config not initialized")
 	}
 	cfg.Client.EnableEndgameMode = enabled
-	
+
 	if a.client != nil {
 		a.client.SetEndgameModeEnabled(enabled)
 	}
-	
+
 	runtime.EventsEmit(a.ctx, "configUpdated", a.GetConfig())
 	return nil
 }
@@ -1142,10 +1142,15 @@ func (a *App) PublishToWeb(cid, description, category string, tags []string, vis
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Check for non-success status codes
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(respBody))
+	}
+
 	// Parse response
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, fmt.Errorf("failed to parse response (got: %s): %w", string(respBody[:min(len(respBody), 100)]), err)
 	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {

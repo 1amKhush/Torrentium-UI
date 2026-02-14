@@ -126,7 +126,7 @@ The Torrentium desktop app includes built-in support for publishing to the web p
 4. Click "Publish"
 
 Configure the portal URL in Settings > Web Share:
-- **Portal URL**: Your deployed portal URL (e.g., `https://share.torrentium.io`)
+- **Portal URL**: Your deployed portal URL (e.g., `https://torrentium-webshare.onrender.com/portal/#/`)
 - **API Key**: If your portal requires authentication
 
 ## Self-Hosting

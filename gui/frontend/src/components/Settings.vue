@@ -676,7 +676,7 @@ onMounted(() => {
               <input
                 type="url"
                 v-model="webShareConfig.portalUrl"
-                placeholder="https://share.torrentium.io"
+                placeholder="https://torrentium-webshare.onrender.com/portal/#/"
                 class="text-input full-width"
               />
             </div>

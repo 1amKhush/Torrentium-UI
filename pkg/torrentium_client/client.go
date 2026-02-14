@@ -129,11 +129,11 @@ type Client struct {
 	uploadProgressMu sync.RWMutex
 	maxUploadRate    int64 // bytes per second, 0 = unlimited
 	// Download queue management
-	downloadQueue      *DownloadQueue
-	adaptiveManager    *AdaptiveDownloadManager
-	endgameManager     *EndgameManager
-	checkpointer       *DownloadCheckpointer
-	dhtRetryHelper     *DHTRetryHelper
+	downloadQueue   *DownloadQueue
+	adaptiveManager *AdaptiveDownloadManager
+	endgameManager  *EndgameManager
+	checkpointer    *DownloadCheckpointer
+	dhtRetryHelper  *DHTRetryHelper
 }
 
 type FileInfo struct {
@@ -1182,6 +1182,13 @@ func (c *Client) DownloadFile(cidStr string) error {
 	} else {
 		if err := os.Rename(tempPath, finalPath); err != nil {
 			return fmt.Errorf("failed to rename file: %w", err)
+		}
+	}
+
+	// Save download to history
+	if c.db != nil {
+		if err := c.db.AddDownload(context.Background(), cidStr, manifest.Filename, manifest.TotalSize, finalPath); err != nil {
+			logger.Warn().Err(err).Msg("Failed to save download to history")
 		}
 	}
 

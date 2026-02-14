@@ -60,9 +60,8 @@ func main() {
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
 		OnBeforeClose: func(ctx context.Context) (prevent bool) {
-			// Minimize to tray instead of closing
-			runtime.WindowMinimise(ctx)
-			return true // Prevent the window from closing
+			// Allow the app to close normally
+			return false
 		},
 		Bind: []interface{}{
 			app,

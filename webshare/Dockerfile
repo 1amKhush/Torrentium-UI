@@ -13,10 +13,10 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts && chmod -R 755 node_modules/.bin
 
 COPY frontend/ .
-RUN npm run build
+RUN npx vite build
 
 # Final stage
 FROM alpine:latest
